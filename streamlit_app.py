@@ -6,10 +6,10 @@ import onnxruntime as ort
 st.set_page_config(page_title="Brain Tumor Demo", layout="centered")
 
 st.title("🧠 Brain Tumor Detection Demo")
-st.write("Sube una imagen para ejecutar inferencia con ONNX y ver la detección")
+st.write("Sube una imagen para ejecutar inferencia con ONNX y visualizar la región detectada")
 
 MODEL_PATH = "best.onnx"
-CONF_THRESHOLD = 0.25  # puedes subirlo a 0.40 o 0.50 si salen muchas cajas
+CONF_THRESHOLD = 0.25
 
 @st.cache_resource
 def load_model():
@@ -32,41 +32,48 @@ def preprocess_image(image: Image.Image):
 
     return original_image, original_size, img_array
 
-def draw_detections(image, detections, original_size):
+def get_best_detection(detections, conf_threshold=0.25):
+    """
+    detections expected shape: (N, 6)
+    each row: [x1, y1, x2, y2, conf, cls]
+    """
+    valid = [det for det in detections if det[4] > conf_threshold]
+
+    if not valid:
+        return None
+
+    best = max(valid, key=lambda x: x[4])
+    return best
+
+def draw_best_detection(image, detection, original_size):
     draw = ImageDraw.Draw(image)
     orig_w, orig_h = original_size
 
     scale_x = orig_w / 640.0
     scale_y = orig_h / 640.0
 
-    count = 0
+    x1, y1, x2, y2, conf, cls = detection
 
-    for det in detections:
-        x1, y1, x2, y2, conf, cls = det
+    # Escalar coordenadas desde 640x640 al tamaño original
+    x1 = x1 * scale_x
+    x2 = x2 * scale_x
+    y1 = y1 * scale_y
+    y2 = y2 * scale_y
 
-        if conf < CONF_THRESHOLD:
-            continue
+    draw.rectangle([x1, y1, x2, y2], outline="red", width=4)
+    label = f"Tumor {conf:.2f}"
+    draw.text((x1, max(0, y1 - 18)), label, fill="red")
 
-        # escalar coordenadas desde 640x640 a tamaño original
-        x1 = x1 * scale_x
-        x2 = x2 * scale_x
-        y1 = y1 * scale_y
-        y2 = y2 * scale_y
-
-        draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
-        label = f"tumor? {conf:.2f} | cls {int(cls)}"
-        draw.text((x1, max(0, y1 - 15)), label, fill="red")
-        count += 1
-
-    return image, count
+    return image
 
 uploaded_file = st.file_uploader("Upload image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
+
     st.image(image, caption="Imagen original", use_container_width=True)
 
-    if st.button("Detectar regiones"):
+    if st.button("Detectar tumor"):
         try:
             session = load_model()
 
@@ -77,30 +84,48 @@ if uploaded_file is not None:
 
             outputs = session.run(output_names, {input_name: input_tensor})
 
-            # salida esperada: (1, 300, 6)
+            # salida principal esperada: (1, 300, 6)
             detections = outputs[0][0]
 
-            detected_image, num_boxes = draw_detections(
-                original_image.copy(),
-                detections,
-                original_size
-            )
+            best_detection = get_best_detection(detections, CONF_THRESHOLD)
 
-            st.success("Inferencia ejecutada correctamente")
-            st.write(f"Detecciones con confianza > {CONF_THRESHOLD}: {num_boxes}")
+            st.write("---")
+            st.subheader("Resultado del análisis")
 
-            st.image(
-                detected_image,
-                caption="Imagen con regiones detectadas",
-                use_container_width=True
-            )
+            if best_detection is not None:
+                detected_image = draw_best_detection(
+                    original_image.copy(),
+                    best_detection,
+                    original_size
+                )
 
-            with st.expander("Ver detalles del output"):
-                st.write(f"Input name: {input_name}")
-                st.write(f"Input shape esperada: {session.get_inputs()[0].shape}")
-                st.write(f"Número de salidas: {len(outputs)}")
-                st.write(f"Shape salida principal: {outputs[0].shape}")
-                st.write(detections[:10])
+                max_conf = float(best_detection[4])
+
+                st.error(f"⚠️ Se detectó tumor")
+                st.write(f"**Confianza de la detección:** {max_conf:.2f}")
+
+                st.image(
+                    detected_image,
+                    caption="Imagen con la mejor región detectada",
+                    use_container_width=True
+                )
+            else:
+                st.success("✅ No se detectó tumor")
+                st.image(
+                    original_image,
+                    caption="No se encontraron regiones con confianza suficiente",
+                    use_container_width=True
+                )
+
+            with st.expander("Ver detalles técnicos"):
+                st.write(f"**Input name:** {input_name}")
+                st.write(f"**Input shape esperada:** {session.get_inputs()[0].shape}")
+                st.write(f"**Número de salidas:** {len(outputs)}")
+                st.write(f"**Shape salida principal:** {outputs[0].shape}")
+
+                preview = detections[:10]
+                st.write("**Primeras 10 detecciones crudas:**")
+                st.write(preview)
 
         except Exception as e:
             st.error(f"Error ejecutando el modelo: {e}")
